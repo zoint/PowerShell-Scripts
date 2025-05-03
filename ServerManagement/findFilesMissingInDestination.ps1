@@ -142,7 +142,10 @@ Write-Host "Found $($destFiles.Count) files in destination directory" -Foregroun
 Write-Host "`nPhase 3: Comparing files..." -ForegroundColor Green
 
 # Find missing files (files in source that aren't in destination)
-$missingFiles = [System.Collections.Generic.HashSet[string]]::new($sourceFiles)
+$missingFiles = [System.Collections.Generic.HashSet[string]]::new()
+foreach ($file in $sourceFiles) {
+    [void]$missingFiles.Add($file)
+}
 $missingFiles.ExceptWith($destFiles)
 $missingCount = $missingFiles.Count
 
