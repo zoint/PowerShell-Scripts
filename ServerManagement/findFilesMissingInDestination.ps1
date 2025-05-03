@@ -37,6 +37,12 @@ if (-not (Test-Path $DestinationPath)) {
     exit 1
 }
 
+Write-Host "`nStarting file comparison process..." -ForegroundColor Green
+Write-Host "Source Path: $SourcePath" -ForegroundColor Cyan
+Write-Host "Destination Path: $DestinationPath" -ForegroundColor Cyan
+Write-Host "Batch Size: $BatchSize files" -ForegroundColor Cyan
+Write-Host "Maximum concurrent jobs: $MaxJobs`n" -ForegroundColor Cyan
+
 # Initialize arrays to store results
 $sourceFiles = [System.Collections.ArrayList]::new()
 $destFiles = [System.Collections.ArrayList]::new()
@@ -58,7 +64,7 @@ function Invoke-FilesParallel {
     $sync = [System.Collections.ArrayList]::Synchronized($ResultArray)
     $runspacePool = [runspacefactory]::CreateRunspacePool(1, $MaxJobs)
     $runspacePool.Open()
-    $runspaces = @()
+    $runspaces = [System.Collections.ArrayList]::new()
 
     for ($i = 0; $i -lt $batches; $i++) {
         $skip = $i * $BatchSize
@@ -78,11 +84,11 @@ function Invoke-FilesParallel {
             }
             Get-FilesBatch -Path $path -Skip $skip -First $batchSize
         }).AddArgument($Path).AddArgument($skip).AddArgument($BatchSize)
-        $runspaces += [PSCustomObject]@{
+        $null = $runspaces.Add([PSCustomObject]@{
             Pipe = $powershell
             Handle = $powershell.BeginInvoke()
             Batch = $i
-        }
+        })
     }
 
     $completed = 0
@@ -117,23 +123,33 @@ function Invoke-FilesParallel {
 
 
 # Process source and destination files
+Write-Host "`nPhase 1: Processing source directory..." -ForegroundColor Green
 Invoke-FilesParallel -Path $SourcePath -Type "source" -ResultArray $sourceFiles
-Invoke-FilesParallel -Path $DestinationPath -Type "destination" -ResultArray $destFiles
+Write-Host "Found $($sourceFiles.Count) files in source directory" -ForegroundColor Cyan
 
-Write-Host "Comparing files..." -ForegroundColor Cyan
+Write-Host "`nPhase 2: Processing destination directory..." -ForegroundColor Green
+Invoke-FilesParallel -Path $DestinationPath -Type "destination" -ResultArray $destFiles
+Write-Host "Found $($destFiles.Count) files in destination directory" -ForegroundColor Cyan
+
+Write-Host "`nPhase 3: Comparing files..." -ForegroundColor Green
 # Compare files between directories using hash tables for better performance
 $destHash = @{}
 $destFiles | ForEach-Object { $destHash[$_.RelativePath] = $_ }
 
+Write-Host "Building comparison hash table..." -ForegroundColor Cyan
 $missingFiles = $sourceFiles | Where-Object { 
     -not $destHash.ContainsKey($_.RelativePath)
 }
 
+$missingCount = ($missingFiles | Measure-Object).Count
+
 if ($missingFiles) {
-    Write-Host "`nFiles that exist in source but are missing in destination:" -ForegroundColor Yellow
+    Write-Host "`nFound $missingCount files that exist in source but are missing in destination:" -ForegroundColor Yellow
     $missingFiles | ForEach-Object {
-        Write-Host "Missing: $($_.RelativePath)"
+        Write-Host "Missing: $($_.RelativePath)" -ForegroundColor Red
     }
 } else {
-    Write-Host "`nAll files from source exist in destination." -ForegroundColor Green
+    Write-Host "`nComparison complete! All files from source exist in destination." -ForegroundColor Green
 }
+
+Write-Host "`nProcess completed!" -ForegroundColor Green
