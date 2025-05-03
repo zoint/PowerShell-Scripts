@@ -62,48 +62,35 @@ function Invoke-FilesParallel {
         [System.Collections.Concurrent.ConcurrentBag[string]]$ResultBag
     )
 
-    Write-Host "Getting files from $Type..." -ForegroundColor Cyan
+    Write-Host "Processing $Type directory..." -ForegroundColor Cyan
     
-    # Create a list to store all files
-    $files = [System.Collections.Generic.List[string]]::new()
-    
-    try {
-        # Use EnumerateFiles to get files and handle exceptions per file/directory
-        $di = New-Object System.IO.DirectoryInfo($Path)
-        $di.EnumerateFiles("*", [System.IO.SearchOption]::AllDirectories) | ForEach-Object {
-            try {
-                $files.Add($_.FullName)
-            }
-            catch {
-                Write-Warning "Unable to access file: $($_.FullName)"
-            }
-        }
-    }
-    catch {
-        Write-Warning "Error enumerating files: $_"
-    }
-
-    $totalFiles = $files.Count
-    Write-Host "Found $totalFiles files in $Type" -ForegroundColor Cyan
-
-    $batches = [math]::Ceiling($totalFiles / $BatchSize)
     $runspacePool = [runspacefactory]::CreateRunspacePool(1, $MaxJobs)
     $runspacePool.Open()
-    $runspaces = [System.Collections.ArrayList]::new()
 
-    for ($i = 0; $i -lt $batches; $i++) {
-        $skip = $i * $BatchSize
-        $batchFiles = $files | Select-Object -Skip $skip -First $BatchSize
-        
-        $powershell = [powershell]::Create()
-        $powershell.RunspacePool = $runspacePool
-        
-        $null = $powershell.AddScript({
-            param($path, $batchFiles)
-            foreach ($file in $batchFiles) {
-                $file.Substring($path.Length)
+    # Create a single runspace that will process all files
+    $powershell = [powershell]::Create()
+    $powershell.RunspacePool = $runspacePool
+    
+    $null = $powershell.AddScript({
+        param($path)
+        try {
+            $di = New-Object System.IO.DirectoryInfo($path)
+            $di.EnumerateFiles("*", [System.IO.SearchOption]::AllDirectories) | ForEach-Object {
+                try {
+                    $_.FullName.Substring($path.Length)
+                }
+                catch {
+                    Write-Warning "Unable to process file: $($_.FullName)"
+                }
             }
-        }).AddArgument($Path).AddArgument($batchFiles)
+        }
+        catch {
+            Write-Warning "Error enumerating files: $_"
+        }
+    }).AddArgument($Path)
+    
+    # Start the processing
+    $handle = $powershell.BeginInvoke()
         
         $null = $runspaces.Add([PSCustomObject]@{
             Pipe = $powershell
