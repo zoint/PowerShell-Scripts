@@ -6,8 +6,26 @@ param(
     [string]$SourcePath,
     
     [Parameter(Mandatory=$true)]
-    [string]$DestinationPath
+    [string]$DestinationPath,
+
+    [Parameter(Mandatory=$false)]
+    [int]$BatchSize = 10000,
+
+    [Parameter(Mandatory=$false)]
+    [int]$MaxJobs = 4
 )
+
+# Helper function to get files in batches
+function Get-FilesBatch {
+    param (
+        [string]$Path,
+        [int]$Skip,
+        [int]$First
+    )
+    Get-ChildItem -Path $Path -File -Recurse | 
+        Select-Object Name, FullName, Length, LastWriteTime |
+        Select-Object -Skip $Skip -First $First
+}
 
 # Verify paths exist
 if (-not (Test-Path $SourcePath)) {
@@ -19,43 +37,73 @@ if (-not (Test-Path $DestinationPath)) {
     exit 1
 }
 
-# Get files from both directories recursively
-Write-Host "Gathering files from source directory..." -ForegroundColor Cyan
-$sourceFiles = @(Get-ChildItem -Path $SourcePath -Recurse -File)
-$totalSource = $sourceFiles.Count
-Write-Host "Processing $totalSource files from source..." -ForegroundColor Cyan
-$sourceFiles = $sourceFiles | ForEach-Object -Begin {
-    $current = 0
-} -Process {
-    $current++
-    if ($current % 100 -eq 0) {  # Update progress every 100 files for better performance
-        Write-Progress -Activity "Processing source files" -Status "$current of $totalSource files" -PercentComplete (($current / $totalSource) * 100)
-    }
-    $_ | Select-Object Name, FullName, Length, LastWriteTime, 
-    @{Name="RelativePath";Expression={$_.FullName.Substring($SourcePath.Length)}}
-}
-Write-Progress -Activity "Processing source files" -Completed
+# Initialize arrays to store results
+$sourceFiles = [System.Collections.ArrayList]::new()
+$destFiles = [System.Collections.ArrayList]::new()
 
-Write-Host "Gathering files from destination directory..." -ForegroundColor Cyan
-$destFiles = @(Get-ChildItem -Path $DestinationPath -Recurse -File)
-$totalDest = $destFiles.Count
-Write-Host "Processing $totalDest files from destination..." -ForegroundColor Cyan
-$destFiles = $destFiles | ForEach-Object -Begin {
-    $current = 0
-} -Process {
-    $current++
-    if ($current % 100 -eq 0) {  # Update progress every 100 files for better performance
-        Write-Progress -Activity "Processing destination files" -Status "$current of $totalDest files" -PercentComplete (($current / $totalDest) * 100)
-    }
-    $_ | Select-Object Name, FullName, Length, LastWriteTime,
-    @{Name="RelativePath";Expression={$_.FullName.Substring($DestinationPath.Length)}}
-}
-Write-Progress -Activity "Processing destination files" -Completed
+# Function to process files in parallel
+function Process-FilesParallel {
+    param(
+        [string]$Path,
+        [string]$Type,
+        [System.Collections.ArrayList]$ResultArray
+    )
 
-Write-Host "Comparing $totalSource source files with $totalDest destination files..." -ForegroundColor Cyan
-# Compare files between directories
-$missingFiles = Compare-Object -ReferenceObject $sourceFiles -DifferenceObject $destFiles -Property RelativePath |
-    Where-Object { $_.SideIndicator -eq "<=" }
+    $totalFiles = (Get-ChildItem -Path $Path -File -Recurse | Measure-Object).Count
+    $batches = [math]::Ceiling($totalFiles / $BatchSize)
+    
+    Write-Host "Processing $totalFiles files from $Type in $batches batches..." -ForegroundColor Cyan
+
+    for ($i = 0; $i -lt $batches; $i += $MaxJobs) {
+        $jobs = @()
+        
+        # Start parallel jobs
+        for ($j = 0; $j -lt $MaxJobs -and ($i + $j) -lt $batches; $j++) {
+            $skip = ($i + $j) * $BatchSize
+            $jobs += Start-Job -ScriptBlock {
+                param($path, $skip, $batchSize)
+                Get-FilesBatch -Path $path -Skip $skip -First $batchSize
+            } -ArgumentList $Path, $skip, $BatchSize
+        }
+
+        # Wait for all jobs and process results
+        $jobs | Wait-Job | ForEach-Object {
+            $results = Receive-Job -Job $_ -AutoRemoveJob -Wait
+            foreach ($result in $results) {
+                $relativePath = $result.FullName.Substring($Path.Length)
+                $null = $ResultArray.Add([PSCustomObject]@{
+                    Name = $result.Name
+                    FullName = $result.FullName
+                    Length = $result.Length
+                    LastWriteTime = $result.LastWriteTime
+                    RelativePath = $relativePath
+                })
+            }
+        }
+
+        # Report progress
+        $processed = [Math]::Min(($i + $MaxJobs) * $BatchSize, $totalFiles)
+        Write-Progress -Activity "Processing $Type files" -Status "$processed of $totalFiles files" -PercentComplete (($processed / $totalFiles) * 100)
+        
+        # Force garbage collection
+        [System.GC]::Collect()
+    }
+    
+    Write-Progress -Activity "Processing $Type files" -Completed
+}
+
+# Process source and destination files
+Process-FilesParallel -Path $SourcePath -Type "source" -ResultArray $sourceFiles
+Process-FilesParallel -Path $DestinationPath -Type "destination" -ResultArray $destFiles
+
+Write-Host "Comparing files..." -ForegroundColor Cyan
+# Compare files between directories using hash tables for better performance
+$destHash = @{}
+$destFiles | ForEach-Object { $destHash[$_.RelativePath] = $_ }
+
+$missingFiles = $sourceFiles | Where-Object { 
+    -not $destHash.ContainsKey($_.RelativePath)
+}
 
 if ($missingFiles) {
     Write-Host "`nFiles that exist in source but are missing in destination:" -ForegroundColor Yellow
