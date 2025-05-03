@@ -51,25 +51,39 @@ function Invoke-FilesParallel {
     $runspacePool = [runspacefactory]::CreateRunspacePool(1, $MaxJobs)
     $runspacePool.Open()
 
+    # First, get total file count
+    $totalFileCount = 0
+    $di = New-Object System.IO.DirectoryInfo($Path)
+    Write-Progress -Activity "Counting files in $Type directory" -Status "Please wait..." -PercentComplete 0
+    try {
+        $totalFileCount = (Get-ChildItem -Path $Path -Recurse -File | Measure-Object).Count
+    }
+    catch {
+        Write-Warning "Error counting files: $_"
+        $totalFileCount = 0
+    }
+    Write-Progress -Activity "Counting files in $Type directory" -Completed
+
     # Create runspace for file processing
     $powershell = [powershell]::Create()
     $powershell.RunspacePool = $runspacePool
     
     # Add script to process files
     $null = $powershell.AddScript({
-        param($path)
+        param($path, $totalFiles)
         
         $results = @()
         try {
             $di = New-Object System.IO.DirectoryInfo($path)
             $files = $di.EnumerateFiles("*", [System.IO.SearchOption]::AllDirectories)
-            $totalFiles = 0
+            $processedFiles = 0
             
             foreach ($file in $files) {
                 try {
-                    $totalFiles++
-                    if ($totalFiles % 1000 -eq 0) {
-                        Write-Progress -Activity "Enumerating files" -Status "$totalFiles files found"
+                    $processedFiles++
+                    if ($totalFiles -gt 0) {
+                        $percentComplete = [math]::Min(100, [math]::Round(($processedFiles / $totalFiles) * 100))
+                        Write-Progress -Activity "Scanning files" -Status "$processedFiles of $totalFiles files processed" -PercentComplete $percentComplete
                     }
                     $results += $file.FullName.Substring($path.Length)
                 }
@@ -78,21 +92,25 @@ function Invoke-FilesParallel {
                 }
             }
             
-            Write-Progress -Activity "Enumerating files" -Completed
+            Write-Progress -Activity "Scanning files" -Completed
             return $results
         }
         catch {
             Write-Warning "Error enumerating files: $_"
             return $results
         }
-    }).AddArgument($Path)
+    }).AddArgument($Path).AddArgument($totalFileCount)
     
     # Start processing
     $handle = $powershell.BeginInvoke()
     
     # Show progress while waiting
+    $spinnerChars = '|','/','-','\'
+    $spinnerIndex = 0
     while (-not $handle.IsCompleted) {
-        Write-Progress -Activity "Processing $Type directory" -Status "Scanning files..."
+        $spinnerChar = $spinnerChars[$spinnerIndex % $spinnerChars.Length]
+        Write-Progress -Activity "Processing $Type directory" -Status "Waiting for processing to complete... $spinnerChar"
+        $spinnerIndex++
         Start-Sleep -Milliseconds 100
     }
     
@@ -124,8 +142,21 @@ Write-Host "`nPhase 3: Comparing files..." -ForegroundColor Green
 $destHashSet = [System.Collections.Generic.HashSet[string]]::new([string[]]$destFiles)
 
 Write-Host "Finding missing files..." -ForegroundColor Cyan
-$missingFiles = $sourceFiles | Where-Object { -not $destHashSet.Contains($_) }
-$missingCount = ($missingFiles | Measure-Object).Count
+$processedFiles = 0
+$totalSourceFiles = $sourceFiles.Count
+$missingFiles = @()
+
+foreach ($file in $sourceFiles) {
+    $processedFiles++
+    $percentComplete = [math]::Min(100, [math]::Round(($processedFiles / $totalSourceFiles) * 100))
+    Write-Progress -Activity "Comparing files" -Status "$processedFiles of $totalSourceFiles files checked" -PercentComplete $percentComplete
+    
+    if (-not $destHashSet.Contains($file)) {
+        $missingFiles += $file
+    }
+}
+Write-Progress -Activity "Comparing files" -Completed
+$missingCount = $missingFiles.Count
 
 if ($missingCount -gt 0) {
     Write-Host "`nFound $missingCount files that exist in source but are missing in destination:" -ForegroundColor Yellow
