@@ -75,12 +75,19 @@ function Invoke-FilesParallel {
         param($path)
         try {
             $di = New-Object System.IO.DirectoryInfo($path)
-            $di.EnumerateFiles("*", [System.IO.SearchOption]::AllDirectories) | ForEach-Object {
+            $files = $di.EnumerateFiles("*", [System.IO.SearchOption]::AllDirectories)
+            $totalFiles = 0
+            
+            foreach ($file in $files) {
                 try {
-                    $_.FullName.Substring($path.Length)
+                    $totalFiles++
+                    if ($totalFiles % 1000 -eq 0) {
+                        Write-Progress -Activity "Enumerating files" -Status "$totalFiles files found"
+                    }
+                    $file.FullName.Substring($path.Length)
                 }
                 catch {
-                    Write-Warning "Unable to process file: $($_.FullName)"
+                    Write-Warning "Unable to process file: $($file.FullName)"
                 }
             }
         }
@@ -89,39 +96,27 @@ function Invoke-FilesParallel {
         }
     }).AddArgument($Path)
     
-    # Start the processing
+    # Start the processing and wait for completion
     $handle = $powershell.BeginInvoke()
-        
-        $null = $runspaces.Add([PSCustomObject]@{
-            Pipe = $powershell
-            Handle = $powershell.BeginInvoke()
-            Batch = $i
-        })
+    
+    # Show progress while waiting
+    while (-not $handle.IsCompleted) {
+        Write-Progress -Activity "Processing $Type directory" -Status "Scanning files..."
+        Start-Sleep -Milliseconds 100
     }
-
-    $completed = 0
-    while ($runspaces.Count -gt 0) {
-        for ($r = $runspaces.Count - 1; $r -ge 0; $r--) {
-            $runspace = $runspaces[$r]
-            if ($runspace.Handle.IsCompleted) {
-                $results = $runspace.Pipe.EndInvoke($runspace.Handle)
-                foreach ($relativePath in $results) {
-                    $ResultBag.Add($relativePath)
-                }
-                $runspace.Pipe.Dispose()
-                $runspaces.RemoveAt($r)
-                $completed++
-                $processed = [Math]::Min($completed * $BatchSize, $totalFiles)
-                Write-Progress -Activity "Processing $Type files" -Status "$processed of $totalFiles files" -PercentComplete (($processed / $totalFiles) * 100)
-            }
-        }
-        if ($runspaces.Count -gt 0) {
-            Start-Sleep -Milliseconds 100
-        }
+    
+    # Get the results and add them to the result bag
+    $results = $powershell.EndInvoke($handle)
+    foreach ($relativePath in $results) {
+        $ResultBag.Add($relativePath)
     }
+    
+    # Cleanup
+    $powershell.Dispose()
     $runspacePool.Close()
     $runspacePool.Dispose()
-    Write-Progress -Activity "Processing $Type files" -Completed
+    
+    Write-Progress -Activity "Processing $Type directory" -Completed
 }
 
 # Process source and destination files
