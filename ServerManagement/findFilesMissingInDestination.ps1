@@ -15,8 +15,7 @@ param(
     [int]$MaxJobs = 4
 )
 
-using namespace System.Collections.Generic
-using namespace System.Collections.Concurrent
+
 
 # Helper function to get files in batches using .NET methods
 function Get-FilesBatch {
@@ -62,8 +61,6 @@ function Invoke-FilesParallel {
         [string]$Type,
         [System.Collections.Concurrent.ConcurrentBag[string]]$ResultBag
     )
-
-    Add-Type -AssemblyName System.Collections
 
     # Get all files at once using .NET method - much faster than Get-ChildItem
     Write-Host "Getting files from $Type..." -ForegroundColor Cyan
