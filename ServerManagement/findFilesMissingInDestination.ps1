@@ -20,14 +20,39 @@ if (-not (Test-Path $DestinationPath)) {
 }
 
 # Get files from both directories recursively
-$sourceFiles = Get-ChildItem -Path $SourcePath -Recurse -File | 
-    Select-Object Name, FullName, Length, LastWriteTime, 
+Write-Host "Gathering files from source directory..." -ForegroundColor Cyan
+$sourceFiles = @(Get-ChildItem -Path $SourcePath -Recurse -File)
+$totalSource = $sourceFiles.Count
+Write-Host "Processing $totalSource files from source..." -ForegroundColor Cyan
+$sourceFiles = $sourceFiles | ForEach-Object -Begin {
+    $current = 0
+} -Process {
+    $current++
+    if ($current % 100 -eq 0) {  # Update progress every 100 files for better performance
+        Write-Progress -Activity "Processing source files" -Status "$current of $totalSource files" -PercentComplete (($current / $totalSource) * 100)
+    }
+    $_ | Select-Object Name, FullName, Length, LastWriteTime, 
     @{Name="RelativePath";Expression={$_.FullName.Substring($SourcePath.Length)}}
+}
+Write-Progress -Activity "Processing source files" -Completed
 
-$destFiles = Get-ChildItem -Path $DestinationPath -Recurse -File | 
-    Select-Object Name, FullName, Length, LastWriteTime,
+Write-Host "Gathering files from destination directory..." -ForegroundColor Cyan
+$destFiles = @(Get-ChildItem -Path $DestinationPath -Recurse -File)
+$totalDest = $destFiles.Count
+Write-Host "Processing $totalDest files from destination..." -ForegroundColor Cyan
+$destFiles = $destFiles | ForEach-Object -Begin {
+    $current = 0
+} -Process {
+    $current++
+    if ($current % 100 -eq 0) {  # Update progress every 100 files for better performance
+        Write-Progress -Activity "Processing destination files" -Status "$current of $totalDest files" -PercentComplete (($current / $totalDest) * 100)
+    }
+    $_ | Select-Object Name, FullName, Length, LastWriteTime,
     @{Name="RelativePath";Expression={$_.FullName.Substring($DestinationPath.Length)}}
+}
+Write-Progress -Activity "Processing destination files" -Completed
 
+Write-Host "Comparing $totalSource source files with $totalDest destination files..." -ForegroundColor Cyan
 # Compare files between directories
 $missingFiles = Compare-Object -ReferenceObject $sourceFiles -DifferenceObject $destFiles -Property RelativePath |
     Where-Object { $_.SideIndicator -eq "<=" }
