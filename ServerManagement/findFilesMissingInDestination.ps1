@@ -62,9 +62,27 @@ function Invoke-FilesParallel {
         [System.Collections.Concurrent.ConcurrentBag[string]]$ResultBag
     )
 
-    # Get all files at once using .NET method - much faster than Get-ChildItem
     Write-Host "Getting files from $Type..." -ForegroundColor Cyan
-    $files = [System.IO.Directory]::GetFiles($Path, "*", [System.IO.SearchOption]::AllDirectories)
+    
+    # Create a list to store all files
+    $files = [System.Collections.Generic.List[string]]::new()
+    
+    try {
+        # Use EnumerateFiles to get files and handle exceptions per file/directory
+        $di = New-Object System.IO.DirectoryInfo($Path)
+        $di.EnumerateFiles("*", [System.IO.SearchOption]::AllDirectories) | ForEach-Object {
+            try {
+                $files.Add($_.FullName)
+            }
+            catch {
+                Write-Warning "Unable to access file: $($_.FullName)"
+            }
+        }
+    }
+    catch {
+        Write-Warning "Error enumerating files: $_"
+    }
+
     $totalFiles = $files.Count
     Write-Host "Found $totalFiles files in $Type" -ForegroundColor Cyan
 
