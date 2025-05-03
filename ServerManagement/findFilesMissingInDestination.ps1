@@ -17,22 +17,6 @@ param(
 
 
 
-# Helper function to get files in batches using .NET methods
-function Get-FilesBatch {
-    param (
-        [string]$Path,
-        [int]$Skip,
-        [int]$First
-    )
-    $files = [System.IO.Directory]::GetFiles($Path, "*", [System.IO.SearchOption]::AllDirectories)
-    $files | Select-Object -Skip $Skip -First $First | ForEach-Object {
-        $fullPath = $_
-        [PSCustomObject]@{
-            FullName = $fullPath
-            RelativePath = $fullPath.Substring($Path.Length)
-        }
-    }
-}
 
 # Verify paths exist
 if (-not (Test-Path $SourcePath)) {
@@ -54,7 +38,6 @@ Write-Host "Maximum concurrent jobs: $MaxJobs`n" -ForegroundColor Cyan
 $sourceFiles = [System.Collections.Concurrent.ConcurrentBag[string]]::new()
 $destFiles = [System.Collections.Concurrent.ConcurrentBag[string]]::new()
 
-# Function to process files in parallel using runspaces
 function Invoke-FilesParallel {
     param(
         [string]$Path,
@@ -64,15 +47,19 @@ function Invoke-FilesParallel {
 
     Write-Host "Processing $Type directory..." -ForegroundColor Cyan
     
+    # Create runspace pool
     $runspacePool = [runspacefactory]::CreateRunspacePool(1, $MaxJobs)
     $runspacePool.Open()
 
-    # Create a single runspace that will process all files
+    # Create runspace for file processing
     $powershell = [powershell]::Create()
     $powershell.RunspacePool = $runspacePool
     
+    # Add script to process files
     $null = $powershell.AddScript({
         param($path)
+        
+        $results = @()
         try {
             $di = New-Object System.IO.DirectoryInfo($path)
             $files = $di.EnumerateFiles("*", [System.IO.SearchOption]::AllDirectories)
@@ -84,19 +71,23 @@ function Invoke-FilesParallel {
                     if ($totalFiles % 1000 -eq 0) {
                         Write-Progress -Activity "Enumerating files" -Status "$totalFiles files found"
                     }
-                    $file.FullName.Substring($path.Length)
+                    $results += $file.FullName.Substring($path.Length)
                 }
                 catch {
                     Write-Warning "Unable to process file: $($file.FullName)"
                 }
             }
+            
+            Write-Progress -Activity "Enumerating files" -Completed
+            return $results
         }
         catch {
             Write-Warning "Error enumerating files: $_"
+            return $results
         }
     }).AddArgument($Path)
     
-    # Start the processing and wait for completion
+    # Start processing
     $handle = $powershell.BeginInvoke()
     
     # Show progress while waiting
@@ -105,7 +96,7 @@ function Invoke-FilesParallel {
         Start-Sleep -Milliseconds 100
     }
     
-    # Get the results and add them to the result bag
+    # Get results
     $results = $powershell.EndInvoke($handle)
     foreach ($relativePath in $results) {
         $ResultBag.Add($relativePath)
