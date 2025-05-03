@@ -1,4 +1,4 @@
-#to run this, excecute command
+# to run this, execute command
 # ./findFilesMissingInDestination.ps1 -SourcePath "/path/to/source" -DestinationPath "/path/to/destination"
 [CmdletBinding()]
 param(
@@ -14,9 +14,6 @@ param(
     [Parameter(Mandatory=$false)]
     [int]$MaxJobs = 4
 )
-
-
-
 
 # Verify paths exist
 if (-not (Test-Path $SourcePath)) {
@@ -34,121 +31,125 @@ Write-Host "Destination Path: $DestinationPath" -ForegroundColor Cyan
 Write-Host "Batch Size: $BatchSize files" -ForegroundColor Cyan
 Write-Host "Maximum concurrent jobs: $MaxJobs`n" -ForegroundColor Cyan
 
-# Initialize arrays to store results
-$sourceFiles = [System.Collections.Concurrent.ConcurrentBag[string]]::new()
-$destFiles = [System.Collections.Concurrent.ConcurrentBag[string]]::new()
-
-function Invoke-FilesParallel {
-    param(
-        [string]$Path,
-        [string]$Type,
-        [System.Collections.Concurrent.ConcurrentBag[string]]$ResultBag
+function Get-DirectoryBatches {
+    param (
+        [string]$Path
     )
+    
+    $allFiles = @()
+    $di = New-Object System.IO.DirectoryInfo($Path)
+    $allFiles = $di.EnumerateFiles("*", [System.IO.SearchOption]::AllDirectories)
+    
+    # Split files into batches
+    $batches = @()
+    $currentBatch = @()
+    $count = 0
+    
+    foreach ($file in $allFiles) {
+        $currentBatch += $file
+        $count++
+        
+        if ($count % $BatchSize -eq 0) {
+            $batches += , $currentBatch
+            $currentBatch = @()
+        }
+    }
+    
+    if ($currentBatch.Count -gt 0) {
+        $batches += , $currentBatch
+    }
+    
+    return $batches
+}
 
+function Process-FileBatch {
+    param (
+        [array]$Batch,
+        [string]$BasePath
+    )
+    
+    $results = [System.Collections.Generic.HashSet[string]]::new()
+    foreach ($file in $Batch) {
+        $relativePath = $file.FullName.Substring($BasePath.Length)
+        $null = $results.Add($relativePath)
+    }
+    return $results
+}
+
+function Invoke-ParallelProcessing {
+    param (
+        [string]$Path,
+        [string]$Type
+    )
+    
     Write-Host "Processing $Type directory..." -ForegroundColor Cyan
+    
+    # Get batches of files
+    $batches = Get-DirectoryBatches -Path $Path
     
     # Create runspace pool
     $runspacePool = [runspacefactory]::CreateRunspacePool(1, $MaxJobs)
     $runspacePool.Open()
-
-    # Create runspace for file processing
-    $powershell = [powershell]::Create()
-    $powershell.RunspacePool = $runspacePool
     
-    # Add script to process files
-    $null = $powershell.AddScript({
-        param($path)
-        
-        $results = @()
-        try {
-            $di = New-Object System.IO.DirectoryInfo($path)
-            $files = $di.EnumerateFiles("*", [System.IO.SearchOption]::AllDirectories)
-            $processedFiles = 0
-            
-            foreach ($file in $files) {
-                try {
-                    $processedFiles++
-                    # Update progress every 100 files to reduce overhead
-                    if ($processedFiles % 100 -eq 0) {
-                        Write-Progress -Activity "Scanning files" -Status "Processed $processedFiles files" 
-                    }
-                    $results += $file.FullName.Substring($path.Length)
-                }
-                catch {
-                    Write-Warning "Unable to process file: $($file.FullName)"
-                }
+    $jobs = @()
+    
+    foreach ($batch in $batches) {
+        $powershell = [powershell]::Create().AddScript({
+            param($batch, $basePath)
+            $results = [System.Collections.Generic.HashSet[string]]::new()
+            foreach ($file in $batch) {
+                $relativePath = $file.FullName.Substring($basePath.Length)
+                $null = $results.Add($relativePath)
             }
-            
-            Write-Progress -Activity "Scanning files" -Completed
             return $results
+        }).AddArgument($batch).AddArgument($Path)
+        
+        $powershell.RunspacePool = $runspacePool
+        
+        $jobs += @{
+            PowerShell = $powershell
+            Handle = $powershell.BeginInvoke()
         }
-        catch {
-            Write-Warning "Error enumerating files: $_"
-            return $results
-        }
-    }).AddArgument($Path)
-    
-    # Start processing
-    $handle = $powershell.BeginInvoke()
-    
-    # Show progress while waiting
-    $spinnerChars = '|','/','-','\'
-    $spinnerIndex = 0
-    while (-not $handle.IsCompleted) {
-        $spinnerChar = $spinnerChars[$spinnerIndex % $spinnerChars.Length]
-        Write-Progress -Activity "Processing $Type directory" -Status "Scanning files... $spinnerChar"
-        $spinnerIndex++
-        Start-Sleep -Milliseconds 100
     }
     
-    # Get results
-    $results = $powershell.EndInvoke($handle)
-    foreach ($relativePath in $results) {
-        $ResultBag.Add($relativePath)
+    # Create a HashSet to store all results
+    $results = [System.Collections.Generic.HashSet[string]]::new()
+    
+    # Process completed jobs
+    foreach ($job in $jobs) {
+        $jobResults = $job.PowerShell.EndInvoke($job.Handle)
+        foreach ($result in $jobResults) {
+            $null = $results.Add($result)
+        }
+        $job.PowerShell.Dispose()
     }
     
-    # Cleanup
-    $powershell.Dispose()
     $runspacePool.Close()
     $runspacePool.Dispose()
     
-    Write-Progress -Activity "Processing $Type directory" -Completed
+    return $results
 }
 
-# Process source and destination files
+# Process source and destination files in parallel
 Write-Host "`nPhase 1: Processing source directory..." -ForegroundColor Green
-Invoke-FilesParallel -Path $SourcePath -Type "source" -ResultBag $sourceFiles
+$sourceFiles = Invoke-ParallelProcessing -Path $SourcePath -Type "source"
 Write-Host "Found $($sourceFiles.Count) files in source directory" -ForegroundColor Cyan
 
 Write-Host "`nPhase 2: Processing destination directory..." -ForegroundColor Green
-Invoke-FilesParallel -Path $DestinationPath -Type "destination" -ResultBag $destFiles
+$destFiles = Invoke-ParallelProcessing -Path $DestinationPath -Type "destination"
 Write-Host "Found $($destFiles.Count) files in destination directory" -ForegroundColor Cyan
 
 Write-Host "`nPhase 3: Comparing files..." -ForegroundColor Green
-# Convert destination files to HashSet for faster lookup
-$destHashSet = [System.Collections.Generic.HashSet[string]]::new([string[]]$destFiles)
 
-Write-Host "Finding missing files..." -ForegroundColor Cyan
-$processedFiles = 0
-$totalSourceFiles = $sourceFiles.Count
-$missingFiles = @()
-
-foreach ($file in $sourceFiles) {
-    $processedFiles++
-    $percentComplete = [math]::Min(100, [math]::Round(($processedFiles / $totalSourceFiles) * 100))
-    Write-Progress -Activity "Comparing files" -Status "$processedFiles of $totalSourceFiles files checked" -PercentComplete $percentComplete
-    
-    if (-not $destHashSet.Contains($file)) {
-        $missingFiles += $file
-    }
-}
-Write-Progress -Activity "Comparing files" -Completed
+# Find missing files (files in source that aren't in destination)
+$missingFiles = [System.Collections.Generic.HashSet[string]]::new($sourceFiles)
+$missingFiles.ExceptWith($destFiles)
 $missingCount = $missingFiles.Count
 
 if ($missingCount -gt 0) {
     Write-Host "`nFound $missingCount files that exist in source but are missing in destination:" -ForegroundColor Yellow
-    $missingFiles | ForEach-Object {
-        Write-Host "Missing: $_" -ForegroundColor Red
+    foreach ($file in $missingFiles) {
+        Write-Host "Missing: $file" -ForegroundColor Red
     }
 } else {
     Write-Host "`nComparison complete! All files from source exist in destination." -ForegroundColor Green
