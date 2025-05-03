@@ -12,8 +12,17 @@ param(
     [int]$BatchSize = 10000,
 
     [Parameter(Mandatory=$false)]
-    [int]$MaxJobs = 4
+    [int]$MaxJobs = 4,
+
+    [Parameter(Mandatory=$false)]
+    [string]$OutputPath = ""
 )
+
+# If no output path is specified, create one in the current directory
+if ([string]::IsNullOrEmpty($OutputPath)) {
+    $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
+    $OutputPath = Join-Path (Get-Location) "missing_files_$timestamp.txt"
+}
 
 # Verify paths exist
 if (-not (Test-Path $SourcePath)) {
@@ -154,6 +163,10 @@ if ($missingCount -gt 0) {
     foreach ($file in $missingFiles) {
         Write-Host "Missing: $file" -ForegroundColor Red
     }
+    
+    # Output missing files to the specified output path
+    $missingFiles | Out-File -FilePath $OutputPath -Encoding UTF8
+    Write-Host "`nMissing files have been logged to: $OutputPath" -ForegroundColor Green
 } else {
     Write-Host "`nComparison complete! All files from source exist in destination." -ForegroundColor Green
 }
