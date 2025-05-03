@@ -51,26 +51,13 @@ function Invoke-FilesParallel {
     $runspacePool = [runspacefactory]::CreateRunspacePool(1, $MaxJobs)
     $runspacePool.Open()
 
-    # First, get total file count
-    $totalFileCount = 0
-    $di = New-Object System.IO.DirectoryInfo($Path)
-    Write-Progress -Activity "Counting files in $Type directory" -Status "Please wait..." -PercentComplete 0
-    try {
-        $totalFileCount = (Get-ChildItem -Path $Path -Recurse -File | Measure-Object).Count
-    }
-    catch {
-        Write-Warning "Error counting files: $_"
-        $totalFileCount = 0
-    }
-    Write-Progress -Activity "Counting files in $Type directory" -Completed
-
     # Create runspace for file processing
     $powershell = [powershell]::Create()
     $powershell.RunspacePool = $runspacePool
     
     # Add script to process files
     $null = $powershell.AddScript({
-        param($path, $totalFiles)
+        param($path)
         
         $results = @()
         try {
@@ -81,9 +68,9 @@ function Invoke-FilesParallel {
             foreach ($file in $files) {
                 try {
                     $processedFiles++
-                    if ($totalFiles -gt 0) {
-                        $percentComplete = [math]::Min(100, [math]::Round(($processedFiles / $totalFiles) * 100))
-                        Write-Progress -Activity "Scanning files" -Status "$processedFiles of $totalFiles files processed" -PercentComplete $percentComplete
+                    # Update progress every 100 files to reduce overhead
+                    if ($processedFiles % 100 -eq 0) {
+                        Write-Progress -Activity "Scanning files" -Status "Processed $processedFiles files" 
                     }
                     $results += $file.FullName.Substring($path.Length)
                 }
@@ -99,7 +86,7 @@ function Invoke-FilesParallel {
             Write-Warning "Error enumerating files: $_"
             return $results
         }
-    }).AddArgument($Path).AddArgument($totalFileCount)
+    }).AddArgument($Path)
     
     # Start processing
     $handle = $powershell.BeginInvoke()
@@ -109,7 +96,7 @@ function Invoke-FilesParallel {
     $spinnerIndex = 0
     while (-not $handle.IsCompleted) {
         $spinnerChar = $spinnerChars[$spinnerIndex % $spinnerChars.Length]
-        Write-Progress -Activity "Processing $Type directory" -Status "Waiting for processing to complete... $spinnerChar"
+        Write-Progress -Activity "Processing $Type directory" -Status "Scanning files... $spinnerChar"
         $spinnerIndex++
         Start-Sleep -Milliseconds 100
     }
