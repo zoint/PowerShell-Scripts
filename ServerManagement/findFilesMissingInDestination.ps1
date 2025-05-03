@@ -35,9 +35,7 @@ $missingFiles = Compare-Object -ReferenceObject $sourceFiles -DifferenceObject $
 if ($missingFiles) {
     Write-Host "`nFiles that exist in source but are missing in destination:" -ForegroundColor Yellow
     $missingFiles | ForEach-Object {
-        $sourceFile = $sourceFiles | Where-Object { $_.RelativePath -eq $_.RelativePath }
         Write-Host "Missing: $($_.RelativePath)"
-        Write-Host "Source Details: Size=$($sourceFile.Length), LastWrite=$($sourceFile.LastWriteTime)`n"
     }
 } else {
     Write-Host "`nAll files from source exist in destination." -ForegroundColor Green
